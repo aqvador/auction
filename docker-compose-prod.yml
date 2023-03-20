@@ -1,0 +1,109 @@
+version: "3.9"
+
+services:
+
+  manager_redis:
+    image: redis:latest
+    restart: always
+    command: redis-server /usr/local/etc/redis/redis.conf
+    volumes:
+      - ./docker/redis/config/redis.conf:/usr/local/etc/redis/redis.conf:ro
+      - ./docker/redis/data/:/data:rw
+
+  ########  BEGIN  ########
+  ######## PHP-CLI ########
+  manager_php-cli:
+    working_dir: /app
+    build:
+      context: ./docker
+      dockerfile: php_cli.docker
+    command: bash -c "composer install && php yii migrate --interactive=0"
+    depends_on:
+      manager_redis:
+        condition: service_started
+      manager_database:
+        condition: service_healthy
+    volumes:
+      - ./src:/app:rw
+  ######## PHP-CLI ########
+  ########   END   ########
+
+  ########  BEGIN  ########
+  ######## PHP-FPM ########
+  manager_php-fpm:
+    working_dir: /app
+    environment:
+      PHP_INI_SCAN_DIR: "/usr/local/etc/php/custom.d:/usr/local/etc/php/conf.d"
+    build:
+      context: ./docker
+      dockerfile: php_fpm.docker
+    restart: always
+    depends_on:
+      manager_redis:
+        condition: service_started
+      manager_database:
+        condition: service_healthy
+    volumes:
+      - ./src:/app:rw
+      - ./docker/php:/usr/local/etc/php/custom.d
+  ######## PHP-FPM ########
+  ########   END   ########
+
+  ########    BEGIN   ########
+  ######## SUPERVISOR ########
+  manager_supervisor:
+    working_dir: /app
+    build:
+      context: ./docker
+      dockerfile: php_supervisor.docker
+    restart: always
+    depends_on:
+      manager_redis:
+        condition: service_started
+      manager_database:
+        condition: service_healthy
+    volumes:
+      - ./src:/app:rw
+      - ./docker/supervisor/conf.d:/etc/supervisor/conf.d
+      - ./logs/supervisor:/var/log/supervisor
+  ######## SUPERVISOR ########
+  ########     END    ########
+
+  manager_nginx:
+    image: nginx:latest
+    restart: always
+    depends_on:
+      - manager_php-fpm
+    volumes:
+      - ./src:/app:rw
+      - ./docker/nginx/hosts:/etc/nginx/conf.d
+      - ./logs/nginx:/var/log/nginx:rw
+    networks:
+      default:
+        ipv4_address: ${HOST_NGINX}
+
+  manager_database:
+    image: mariadb:latest
+    restart: always
+    environment:
+      #  такое себе) ну а что) это же тестовое =).
+      MYSQL_ALLOW_EMPTY_PASSWORD: "yes"
+      MYSQL_USER: ${DATABASE_USER}
+      MYSQL_PASSWORD: ${DATABASE_PASSWORD}
+      MYSQL_DATABASE: ${DATABASE_NAME}
+    healthcheck:
+      test: ["CMD", "mysqladmin" ,"ping", "-h", "localhost"]
+      timeout: 20s
+      retries: 10
+#  на случай важных переговоров
+#    ports:
+#      - ${DATABASE_EXTERNAL_PORT}:3306
+    volumes:
+      - ./docker/database/data:/var/lib/mysql:rw
+      - ./logs/database:/var/log/mysql:rw
+
+networks:
+  default:
+    ipam:
+      config:
+        - subnet: ${NETWORK}
